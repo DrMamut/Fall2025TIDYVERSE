@@ -61,3 +61,6 @@ Add a few lines to this readme with your name, the api you selected, and a descr
 12. Samuel Dosky, Weatherstack API https://weatherstack.com/
     - Analyzed and compared current temperatures across major U.S. cities using live weather data retrieved via the Weatherstack API, visualizing regional temperature differences with tidyverse tools.
     - Samuel Dosky extended Masoud Mahdisoltani’s jsDelivr API vignette
+
+13. Domllermut C. Alamo, Individual Stock Analysis with Multi-Factor Trading Signals - https://www.alphavantage.co/
+    - It's a simple R script to analyse individual  stocks and generate buy/sell/hold signals based on information gathered from www.alphavantage.co   
