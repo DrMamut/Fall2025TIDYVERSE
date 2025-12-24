@@ -1,0 +1,691 @@
+---
+title: "Individual Stock Analysis with Multi-Factor Trading Signals - Tidyverse create - DC Alamo"
+author: "Domllermut C. Alamo"
+format: pdf
+editor: visual
+---
+
+## Introduction
+
+### API Description
+
+This vignette uses the [Alpha Vantage API](https://www.alphavantage.co/), a leading provider of free APIs for real-time and historical financial market data. I initially wanted to use yahoo finance but it seems that it got discontinued. The API monitors the move of individual stocks for the intention of providing real time data analysis for algorithmic trading. 
+
+### Research Question
+
+**How can we analyze the historical price behavior and volatility characteristics of individual stocks to inform investment decisions?**
+
+Understanding a stock's historical price patterns, volatility, and return distribution is fundamental to investment analysis. By creating a flexible analytical framework, I can examine any stock's recent performance, calculate key risk metrics, and visualize price trends and return patterns. This approach allows me to quickly assess whether a stock has been trending upward or downward, how volatile it has been, and what kind of daily price movements to expect, all crucial information for making informed buy/sell/hold decisions.
+
+## Data Collection and Analysis
+
+### Loading Required Libraries
+
+```{r setup, include = TRUE,message = FALSE, warning = FALSE, results = 'hide' }
+library(httr2)
+library(tidyverse)
+library(jsonlite)
+library(lubridate)
+library(patchwork)  # For combining plots
+library(zoo)        # For rolling window calculations
+
+penguin_colors <- c("#FF6600",  # Bright Orange # Penguin colors for the graphs
+                    "#9933FF",  # Bright Purple
+                    "#0066CC",  # Deep Blue
+                    "#FF0000",  # Bright Red
+                    "#00CC66",  # Bright Green
+                    "#FFCC00",  # Bright Yellow
+                    "#00CCCC",  # Cyan/Turquoise
+                    "#FF3399")  # Hot Pink
+# Set chunk options 
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+### Setting Up API Key
+
+Alpha Vantage requires a free API key for authentication. For security, store your API key in an environment variable rather than hardcoding it in your script. To use this script you need to add your API key that you can get for free at [Alpha Vantage API](https://www.alphavantage.co/).  DO NOT SHARE YOUR API.
+
+```{r api-setup}
+# Store your API key as an environment variable or load it securely
+# For this demo, replace 'YOUR_API_KEY' with your actual key
+
+#api_key <- ""  # <---- Remove the comment and replace it with your key. 
+
+```
+
+```{r include = FALSE}
+# Store your API key as an environment variable or load it securely
+# For this demo, replace 'YOUR_API_KEY' with your actual key
+
+api_key <- ""  # <---- Replace with your key in the next chunk 
+
+```
+
+### Fetching Historical Stock Data
+
+Provide the ticket of the stock you'll like to analyse. For this demo, we are analysis NVDA, but any other should work too. 
+```{r echo=TRUE}
+# Define the stock you want to analyze
+# Simply change this ticker symbol to analyze any stock
+stock_symbol <- "AMD"  # <----- Change this to any ticker (e.g., "TSLA", "AAPL", "JPM")
+```
+
+The Alpha Vantage API provides a `TIME_SERIES_DAILY` function that returns daily OHLCV (Open, High, Low, Close, Volume) data for any stock ticker.
+
+```{r fetch-stock-data, cache=TRUE}
+# Build API request for the specified stock
+response <- request("https://www.alphavantage.co/query") |>
+  req_url_query(
+    `function` = "TIME_SERIES_DAILY",
+    symbol = stock_symbol,
+    outputsize = "compact",  # Free tier: last 100 trading days
+    apikey = api_key
+  ) |>
+  req_perform() |>
+  resp_body_json()
+
+# Check if we got an error message or valid data
+if ("Error Message" %in% names(response)) {
+  stop("API Error: ", response$`Error Message`, 
+       "\nCheck that '", stock_symbol, "' is a valid ticker symbol.")
+}
+
+if ("Note" %in% names(response)) {
+  stop("API Rate Limit: ", response$Note,
+       "\nYou may have exceeded the API call frequency limit (5 calls/min).")
+}
+
+# Extract time series data
+time_series <- response$`Time Series (Daily)`
+
+# Check if time series data exists
+if (is.null(time_series) || length(time_series) == 0) {
+  cat("API Response structure:\n")
+  print(names(response))
+  stop("No time series data found. This might mean:\n",
+       "1. Invalid API key\n",
+       "2. Invalid stock symbol\n",
+       "3. API response format changed\n",
+       "Please check your API key and stock symbol.")
+}
+
+# Convert to tibble
+stock_df <- map_dfr(names(time_series), function(date) {
+  day_data <- time_series[[date]]  # Extract this day's data first
+  tibble(
+    date = ymd(date),
+    open = as.numeric(day_data$`1. open`),
+    high = as.numeric(day_data$`2. high`),
+    low = as.numeric(day_data$`3. low`),
+    close = as.numeric(day_data$`4. close`),
+    volume = as.numeric(day_data$`5. volume`)
+  )
+}) |>
+  arrange(date)
+
+# Display basic info
+cat(paste("Analyzing:", stock_symbol, "\n"))
+cat(paste("Data points:", nrow(stock_df), "\n"))
+cat(paste("Date range:", min(stock_df$date), "to", max(stock_df$date), "\n\n"))
+
+glimpse(stock_df)
+```
+
+### Calculating Returns and Volatility Metrics
+
+```{r calculate-metrics}
+# Calculate daily returns and volatility metrics
+stock_df <- stock_df |>
+  mutate(
+    # Daily return (percentage change)
+    daily_return = (close - lag(close)) / lag(close) * 100,
+    # Intraday volatility (high-low range as % of close)
+    intraday_volatility = (high - low) / close * 100,
+    # Cumulative return from start
+    cumulative_return = (close / first(close) - 1) * 100
+  )
+
+# Calculate summary statistics
+stock_summary <- stock_df |>
+  summarize(
+    ticker = stock_symbol,
+    start_date = min(date),
+    end_date = max(date),
+    n_days = n(),
+    start_price = first(close),
+    end_price = last(close),
+    current_price = last(close),
+    mean_price = mean(close),
+    min_price = min(close),
+    max_price = max(close),
+    total_return_pct = (last(close) - first(close)) / first(close) * 100,
+    mean_daily_return = mean(daily_return, na.rm = TRUE),
+    volatility = sd(daily_return, na.rm = TRUE),
+    mean_intraday_vol = mean(intraday_volatility, na.rm = TRUE),
+    avg_volume = mean(volume) / 1e6  # in millions
+  )
+
+knitr::kable(stock_summary |> select(ticker, current_price, total_return_pct, 
+                                     volatility, avg_volume), 
+             digits = 2,
+             col.names = c("Ticker", "Current Price ($)", "Total Return (%)", 
+                          "Volatility (SD %)", "Avg Volume (M)"),
+             caption = paste("Summary Statistics for", stock_symbol))
+```
+
+### How the API Works
+
+The `httr2` package provides a clean, pipe-friendly workflow for API requests:
+
+1. **`request()`** creates the base request object with the API endpoint
+2. **`req_url_query()`** adds query parameters:
+   - `function`: Specifies the API endpoint ("TIME_SERIES_DAILY")
+   - `symbol`: Stock ticker symbol (e.g., "AAPL")
+   - `outputsize`: "compact" (100 data points) or "full" (20+ years)
+   - `apikey`: Your authentication key
+3. **`req_perform()`** executes the HTTP GET request
+4. **`resp_body_json()`** parses the JSON response
+
+The Alpha Vantage API returns a nested JSON structure. The time series data is stored under the key `"Time Series (Daily)"`, with dates as keys and OHLCV data as nested values. I use `purrr::map_dfr()` to iterate through each date and extract the relevant price and volume information into a tidy tibble format.
+
+The beauty of this approach is that **you can analyze any stock by simply changing the `stock_symbol` variable** at the top. The rest of the code automatically adapts to display the correct ticker in all visualizations and analyses.
+
+### Price Trend and Volume Analysis
+
+```{r price-volume, fig.width=10, fig.height=7}
+# Create a two-panel plot showing price and volume
+p1 <- ggplot(stock_df, aes(x = date, y = close)) +
+  geom_line(color = "#2C3E50", linewidth = 1) +
+  geom_smooth(method = "loess", se = TRUE, color = "#E74C3C", 
+              linetype = "dashed", linewidth = 0.8) +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(
+    title = paste(stock_symbol, "- Price Trend Analysis"),
+    subtitle = "Daily closing price with smoothed trend line",
+    x = NULL,
+    y = "Closing Price (USD)"
+  ) +
+  theme_minimal(base_size = 11)
+
+p2 <- ggplot(stock_df, aes(x = date, y = volume / 1e6)) +
+  geom_col(fill = "#3498DB", alpha = 0.7) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    x = "Date",
+    y = "Volume (millions)"
+  ) +
+  theme_minimal(base_size = 11)
+
+# Combine plots
+library(patchwork)
+p1 / p2 + plot_layout(heights = c(2, 1))
+```
+
+### Cumulative Return Performance
+
+```{r cumulative-return, fig.width=10, fig.height=6}
+ggplot(stock_df |> filter(!is.na(cumulative_return)), 
+       aes(x = date, y = cumulative_return)) +
+  geom_line(color = "#16A085", linewidth = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_area(aes(y = cumulative_return), fill = "#16A085", alpha = 0.2) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  labs(
+    title = paste(stock_symbol, "- Cumulative Return"),
+    subtitle = paste("Total return over", nrow(stock_df), "trading days"),
+    x = "Date",
+    y = "Cumulative Return (%)"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+### Daily Returns Distribution
+
+```{r returns-distribution, fig.width=10, fig.height=6}
+# Calculate key statistics for annotation
+mean_return <- mean(stock_df$daily_return, na.rm = TRUE)
+sd_return <- sd(stock_df$daily_return, na.rm = TRUE)
+
+ggplot(stock_df |> filter(!is.na(daily_return)), 
+       aes(x = daily_return)) +
+  geom_histogram(aes(y = after_stat(density)), 
+                 bins = 30, fill = "#9B59B6", alpha = 0.7, color = "white") +
+  geom_density(color = "#8E44AD", linewidth = 1.2) +
+  geom_vline(xintercept = mean_return, 
+             linetype = "dashed", color = "#E74C3C", linewidth = 1) +
+  annotate("text", x = mean_return, y = Inf, 
+           label = paste0("Mean: ", round(mean_return, 2), "%"),
+           hjust = -0.1, vjust = 2, color = "#E74C3C", size = 4) +
+  labs(
+    title = paste(stock_symbol, "- Distribution of Daily Returns"),
+    subtitle = paste0("Volatility (SD): ", round(sd_return, 2), "%"),
+    x = "Daily Return (%)",
+    y = "Density"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+### Volatility Over Time (30-Day Rolling Window)
+
+```{r rolling-volatility, fig.width=10, fig.height=6}
+# Calculate 30-day rolling volatility
+stock_df <- stock_df |>
+  arrange(date) |>
+  mutate(
+    rolling_vol = zoo::rollapply(daily_return, width = 30, FUN = sd, 
+                                  fill = NA, align = "right")
+  )
+
+ggplot(stock_df |> filter(!is.na(rolling_vol)), 
+       aes(x = date, y = rolling_vol)) +
+  geom_line(color = "#E67E22", linewidth = 1) +
+  geom_smooth(method = "loess", se = TRUE, color = "#D35400", 
+              linetype = "dashed", linewidth = 0.8) +
+  labs(
+    title = paste(stock_symbol, "- 30-Day Rolling Volatility"),
+    subtitle = "Standard deviation of daily returns over 30-day windows",
+    x = "Date",
+    y = "Volatility (% SD)"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+## Medium-Term Investment Signals
+
+### Three-Factor System Adapted for Free Tier Data
+
+**Note on Data Limitations:** Alpha Vantage's free tier provides 100 trading days of data. While academic research focuses on long-term indicators (200-day MA, 12-month momentum), we can adapt these principles to medium-term timeframes that work within this constraint.
+
+For investors with a medium-term horizon (1-3 months), this section implements a three-factor system that combines:
+
+1. **Trend** - 50-day Moving Average (captures medium-term direction)
+2. **Momentum** - 90-day rate of change (measures recent strength)
+3. **Volatility Context** - 30-day rolling volatility (assesses risk environment)
+
+This adapted approach follows the same **multi-factor confirmation principle** from academic research: combining trend, momentum, and volatility improves signal quality compared to using any single indicator alone.
+
+### Calculating Medium-Term Indicators
+
+```{r long-term-indicators}
+#| cache: true
+
+# Calculate moving averages (50-day and 20-day)
+stock_df <- stock_df |>
+  mutate(
+    ma_50 = zoo::rollmean(close, k = 50, fill = NA, align = "right"),
+    ma_20 = zoo::rollmean(close, k = 20, fill = NA, align = "right"),
+    
+    # 90-day (3-month) rate of change
+    roc_90d = (close / lag(close, 90) - 1) * 100,
+    
+    # 30-day rolling volatility (already calculated earlier)
+    vol_30d = zoo::rollapply(daily_return, width = 30, FUN = sd, 
+                             fill = NA, align = "right"),
+    
+    # Historical median volatility for comparison
+    vol_median = median(vol_30d, na.rm = TRUE),
+    
+    # Average trading volume (20-day)
+    avg_volume_20d = zoo::rollmean(volume, k = 20, fill = NA, align = "right")
+  )
+
+# Calculate the three factors
+stock_df <- stock_df |>
+  mutate(
+    # Factor 1: Trend - Is price above 50-day MA?
+    trend_positive = close > ma_50,
+    
+    # Factor 2: Momentum - Positive 90-day return?
+    momentum_positive = roc_90d > 0,
+    
+    # Factor 3: Volatility - Below historical median?
+    volatility_favorable = vol_30d < vol_median,
+    
+    # Count how many factors are positive
+    factor_score = as.integer(trend_positive) + 
+                   as.integer(momentum_positive) + 
+                   as.integer(volatility_favorable),
+    
+    # Signal classification
+    signal = case_when(
+      factor_score >= 3 ~ "STRONG BUY",
+      factor_score == 2 ~ "BUY/HOLD",
+      factor_score == 1 ~ "CAUTION",
+      factor_score == 0 ~ "SELL/AVOID",
+      TRUE ~ NA_character_
+    )
+  )
+```
+
+### Visualizing Medium-Term Signals
+
+```{r long-term-viz, fig.width=12, fig.height=8}
+#| cache: true
+
+# Use all available data with valid signals
+signal_df <- stock_df |>
+  filter(!is.na(ma_50))  # Need at least 50 days for MA
+
+# Create main price chart with moving averages and signals
+p_price <- ggplot(signal_df, aes(x = date, y = close)) +
+  # Background shading for signals - MORE VISIBLE
+  geom_rect(data = signal_df |> filter(!is.na(signal)),
+            aes(xmin = date - 0.5, xmax = date + 0.5, 
+                ymin = -Inf, ymax = Inf, fill = signal),
+            alpha = 0.25, inherit.aes = FALSE) +  # Increased from 0.1 to 0.25
+  # Price and moving averages
+  geom_line(aes(y = close), color = "black", linewidth = 1.2) +
+  geom_line(aes(y = ma_20, color = "20-day MA"), linewidth = 1) +
+  geom_line(aes(y = ma_50, color = "50-day MA"), linewidth = 1.2) +
+  scale_fill_manual(
+    values = c("STRONG BUY" = "#2ECC71",    # Brighter green
+               "BUY/HOLD" = "#F1C40F",      # Brighter yellow
+               "CAUTION" = "#E67E22",        # Orange
+               "SELL/AVOID" = "#E74C3C"),    # Red
+    name = "Signal"
+  ) +
+  scale_color_manual(
+    values = c("20-day MA" = "#3498DB", "50-day MA" = "#9B59B6"),
+    name = "Indicator"
+  ) +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(
+    title = paste(stock_symbol, "- Medium-Term Investment Signals"),
+    subtitle = "Price with 20-day and 50-day moving averages (background = signal zone)",
+    x = NULL,
+    y = "Price (USD)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "right")
+
+# Factor score over time
+p_factors <- ggplot(signal_df |> filter(!is.na(factor_score)), 
+                    aes(x = date, y = factor_score)) +
+  geom_line(color = "#34495E", linewidth = 1) +
+  geom_point(aes(color = signal), size = 2.5, alpha = 0.8) +  # Larger points
+  scale_color_manual(
+    values = c("STRONG BUY" = "#2ECC71",    # Brighter green
+               "BUY/HOLD" = "#F1C40F",      # Brighter yellow  
+               "CAUTION" = "#E67E22",        # Orange
+               "SELL/AVOID" = "#E74C3C"),    # Red
+    name = "Signal"
+  ) +
+  scale_y_continuous(breaks = 0:3, limits = c(-0.2, 3.2)) +
+  labs(
+    x = "Date",
+    y = "Active Factors (0-3)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "none")
+
+# Combine plots
+p_price / p_factors + plot_layout(heights = c(3, 1))
+```
+
+### Signal History and Performance
+
+```{r signal-analysis}
+#| cache: true
+
+# Identify signal changes (potential entry/exit points)
+signal_changes <- stock_df |>
+  filter(!is.na(signal)) |>
+  mutate(
+    signal_lag = lag(signal),
+    signal_change = signal != signal_lag
+  ) |>
+  filter(signal_change) |>
+  select(date, close, signal, factor_score, 
+         trend_positive, momentum_positive, volatility_favorable)
+
+# Display recent signals
+if (nrow(signal_changes) > 0) {
+  knitr::kable(
+    signal_changes |> tail(min(10, nrow(signal_changes))),
+    digits = 2,
+    caption = paste("Recent Signal Changes for", stock_symbol),
+    col.names = c("Date", "Price", "Signal", "Factor Score", 
+                  "Trend+", "Momentum+", "Vol Favorable")
+  )
+} else {
+  cat("No signal changes detected in the available data period.\n")
+}
+
+# Current signal status
+current_status <- stock_df |> 
+  filter(!is.na(signal)) |> 
+  tail(1) |>
+  select(date, close, signal, factor_score, ma_50, roc_90d, vol_30d)
+
+cat("\n=== Current Status ===\n")
+cat("Date:", format(current_status$date), "\n")
+cat("Price: $", round(current_status$close, 2), "\n")
+cat("Signal:", current_status$signal, "\n")
+cat("Factor Score:", current_status$factor_score, "/ 3\n")
+cat("50-day MA: $", round(current_status$ma_50, 2), "\n")
+cat("90-day Return:", round(current_status$roc_90d, 1), "%\n")
+cat("30-day Volatility:", round(current_status$vol_30d, 2), "%\n")
+```
+
+### Backtesting Signal Performance
+
+```{r backtest}
+#| cache: true
+
+# Simple backtest: Buy on STRONG BUY, Hold through BUY/HOLD, Sell on CAUTION/SELL
+backtest_df <- stock_df |>
+  filter(!is.na(signal)) |>
+  mutate(
+    # Position: 1 = invested, 0 = cash
+    position = case_when(
+      signal %in% c("STRONG BUY", "BUY/HOLD") ~ 1,
+      TRUE ~ 0
+    ),
+    
+    # Daily returns if invested
+    strategy_return = ifelse(position == 1, daily_return, 0),
+    
+    # Cumulative returns
+    strategy_cumulative = cumprod(1 + strategy_return/100) - 1,
+    buy_hold_cumulative = (close / first(close)) - 1
+  )
+
+# Performance summary
+performance <- backtest_df |> tail(1)
+
+perf_summary <- tibble(
+  Strategy = c("Three-Factor System", "Buy & Hold"),
+  `Total Return (%)` = c(
+    performance$strategy_cumulative * 100,
+    performance$buy_hold_cumulative * 100
+  ),
+  `Final Value ($1000)` = c(
+    1000 * (1 + performance$strategy_cumulative),
+    1000 * (1 + performance$buy_hold_cumulative)
+  )
+)
+
+knitr::kable(
+  perf_summary,
+  digits = 2,
+  caption = "Performance Comparison: Three-Factor System vs. Buy & Hold (100-day period)"
+)
+
+# Plot cumulative returns comparison
+ggplot(backtest_df |> filter(!is.na(strategy_cumulative)), 
+       aes(x = date)) +
+  geom_line(aes(y = strategy_cumulative * 100, color = "Three-Factor System"), 
+            linewidth = 1.5) +  # Thicker line
+  geom_line(aes(y = buy_hold_cumulative * 100, color = "Buy & Hold"), 
+            linewidth = 1.2) +
+  scale_color_manual(
+    values = c("Three-Factor System" = "#2ECC71",  # Bright green
+               "Buy & Hold" = "#95A5A6"),           # Gray
+    name = NULL
+  ) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  labs(
+    title = paste(stock_symbol, "- Strategy Performance Comparison"),
+    subtitle = "Cumulative returns over available data period",
+    x = "Date",
+    y = "Cumulative Return (%)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+### Understanding the Adapted System
+
+**Free Tier Data Limitations:**
+
+Alpha Vantage's free tier provides 100 trading days (~4-5 months). While academic research on long-term investing uses:
+- 200-day moving average (needs 200+ days of data) - **Premium only**
+- 12-month momentum (needs 252+ days) - **Premium only**
+
+We've adapted the system to work with available data:
+- **50-day MA** instead of 200-day (still captures medium-term trend)
+- **90-day ROC** instead of 12-month (captures 3-month momentum)
+- **30-day volatility** (works with our data)
+
+**How to Use These Signals:**
+
+1. **STRONG BUY (3/3 factors):** All conditions favorable - highest conviction for positions
+2. **BUY/HOLD (2/3 factors):** Mixed signals - maintain existing positions
+3. **CAUTION (1/3 factors):** Deteriorating conditions - reduce exposure
+4. **SELL/AVOID (0/3 factors):** All factors negative - exit or avoid
+
+**Realistic Expectations:**
+
+- This is a **medium-term system** (1-3 month holding periods) due to data constraints
+- The multi-factor confirmation principle still applies: requiring 2-3 factors reduces false signals
+- Works best in trending markets; may underperform in choppy/sideways conditions
+- 100 days is a limited sample - results should be viewed as illustrative, not definitive
+- For true long-term investing (6-12 months), consider Alpha Vantage's premium tier for access to full historical data
+
+**Upgrading to Long-Term Analysis:**
+
+With a premium API key ($49/month+), you could change to:
+```r
+outputsize = "full"  # 20+ years of data
+ma_200 = zoo::rollmean(close, k = 200, ...)  # True long-term trend
+roc_12m = (close / lag(close, 252) - 1) * 100  # Annual momentum
+```
+
+This would implement the full research-backed system described in academic literature.
+
+## Conclusion
+
+This analysis demonstrates a comprehensive framework for examining individual stock performance using the Alpha Vantage API. By analyzing:
+```{r echo=TRUE}
+cat(stock_symbol, "\n")
+```
+ we uncovered several key insights across both short-term and long-term perspectives:
+
+### Short-Term Analysis
+
+1. **Price trend**: The stock showed a total return of 
+
+```{r echo=TRUE}
+cat(round(stock_summary$total_return_pct, 1), "%\n")
+```
+over the 
+```{r echo=TRUE}
+cat(stock_summary$n_days, "\n")
+```
+trading days analyzed. The smoothed trend line reveals whether the stock has been in an upward, downward, or sideways trajectory.
+
+2. **Volatility characteristics**: With a daily return standard deviation of 
+```{r echo=TRUE}
+cat(round(stock_summary$volatility, 2), "%\n")
+```
+this stock exhibits:
+```{r echo=TRUE}
+ifelse(stock_summary$volatility < 1.5, "relatively low", ifelse(stock_summary$volatility < 2.5, "moderate", "high"))
+```
+volatility. The rolling 30-day volatility chart shows whether risk has been increasing or decreasing over time.
+
+3. **Return distribution**: The histogram of daily returns reveals the typical range of day-to-day price movements. A wider distribution indicates more uncertainty and risk, while a tighter distribution suggests more predictable behavior.
+
+### Medium-Term Investment Framework
+
+4. **Three-Factor Signals**: The adapted three-factor system combines trend (50-day MA), momentum (90-day ROC), and volatility context to generate signals appropriate for the 100-day data window provided by the free API tier. While not as long-term as academic research suggests (which uses 200-day+ indicators), this system still follows the proven multi-factor confirmation principle.
+
+5. **Performance Comparison**: The backtesting section shows how the three-factor system would have performed versus simple buy-and-hold over the available data period, providing realistic expectations about signal effectiveness.
+
+6. **Current Signal Status**: The most recent factor analysis provides actionable guidance based on current market conditions and the strength of the trend, momentum, and volatility factors.
+
+### Practical Application
+
+This analytical framework is **reusable for any stock**. Simply change the `stock_symbol` variable at the top of the script to analyze:
+- Growth stocks (e.g., TSLA, NVDA)
+- Value stocks (e.g., JPM, WMT)
+- Dividend stocks (e.g., KO, PG)
+- International stocks (e.g., BABA, TSM)
+
+The code automatically adapts all visualizations, calculations, and text to the specified ticker, making it a powerful tool for quick stock screening and analysis.
+
+### Investment Implications
+
+Understanding a stock's historical volatility and return patterns helps investors:
+- **Set realistic expectations** about potential gains and losses
+- **Size positions appropriately** based on risk tolerance
+- **Identify entry/exit points** using trend and volatility analysis
+- **Compare alternatives** by running the same analysis on multiple stocks
+
+### Future Extensions
+
+This framework could be further enhanced by:
+- Adding fundamental metrics (P/E ratio, earnings growth, dividend yield) via Alpha Vantage's fundamental data endpoints
+- Incorporating benchmark comparisons (e.g., comparing stock performance to S&P 500 or sector ETF)
+- Calculating Sharpe ratios and other risk-adjusted return metrics (returns per unit of risk)
+- Analyzing correlation with sector peers or market indices to understand systematic vs. idiosyncratic risk
+- Comparing pre/post earnings announcement volatility patterns
+- Adding support/resistance level detection for tactical entry/exit points
+- Implementing stop-loss and position sizing rules based on volatility
+- Creating portfolio-level analysis for multiple stocks simultaneously
+- Adding LLMs integration either by cloud LLMs based systems like Claude Haiku and GPT mini, or even local systems like Ollama.
+
+### Technical Note on API Usage and Free Tier Limitations
+
+This analysis uses Alpha Vantage's free tier which provides:
+- **25 API requests per day**
+- **5 requests per minute**
+- **`outputsize=compact`**: Last 100 trading days (~4-5 months) of data
+- **`outputsize=full`**: Premium feature only (requires paid subscription)
+
+**Impact on Analysis:**
+
+The 100-day data window limits our ability to calculate traditional long-term indicators used in academic research:
+- **200-day moving average**: Requires 200+ days (not possible with free tier)
+- **12-month momentum**: Requires 252 trading days (not possible with free tier)
+
+We've adapted the system to use **medium-term indicators** (50-day MA, 90-day momentum) which still follow the multi-factor confirmation principle but work within the free tier constraints.
+
+**For True Long-Term Analysis:**
+
+If you want to implement the full research-backed system with 200-day MA and 12-month momentum, you would need to:
+1. Subscribe to Alpha Vantage premium ($49/month+)
+2. Change `outputsize = "compact"` to `outputsize = "full"`
+3. Adjust indicators to use longer windows (200-day MA, 252-day momentum)
+
+**Analyzing Multiple Stocks:**
+
+To compare several stocks with the free tier:
+1. Run this analysis for each ticker separately
+2. Wait 12+ seconds between API calls (`Sys.sleep(12)`) to respect the 5 calls/minute limit
+3. Use caching (enabled in this document) to avoid redundant calls during development
+4. Consider storing results in a CSV or database for portfolio-level analysis
+
+This vignette demonstrates how `httr2` enables clean, reproducible financial data analysis workflows that can be easily adapted for different research questions.
+
+## References and Further Reading
+
+**Academic Research on Technical Analysis:**
+
+- Faber, M. (2007). "A Quantitative Approach to Tactical Asset Allocation." *Journal of Wealth Management*.
+- Antonacci, G. (2014). *Dual Momentum Investing: An Innovative Strategy for Higher Returns with Lower Risk*. McGraw-Hill.
+- Brock, W., Lakonishok, J., & LeBaron, B. (1992). "Simple Technical Trading Rules and the Stochastic Properties of Stock Returns." *Journal of Finance*, 47(5), 1731-1764.
+- Lo, A., Mamaysky, H., & Wang, J. (2000). "Foundations of Technical Analysis: Computational Algorithms, Statistical Inference, and Empirical Implementation." *Journal of Finance*, 55(4), 1705-1765.
+- O'Shaughnessy, J. (2011). *What Works on Wall Street* (4th ed.). McGraw-Hill.
+
+**Note:** The three-factor system implemented here is inspired by Faber (2007) and Antonacci (2014), adapted for individual stock analysis. Past performance does not guarantee future results.
